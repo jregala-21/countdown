@@ -77,6 +77,9 @@
                 <button id="voiceControlBtn" type="button" aria-pressed="false" class="px-3.5 py-1.5 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 rounded-xl text-xs font-semibold text-slate-300 transition-all">
                     Enable voice commands
                 </button>
+                <button id="keyboardModeBtn" type="button" aria-pressed="true" class="px-3.5 py-1.5 bg-red-900/60 hover:bg-red-800/70 border border-red-700/70 rounded-xl text-xs font-semibold text-red-200 transition-all">
+                    Keys: Space only
+                </button>
                 <div id="statusBadge" class="px-3.5 py-1.5 rounded-xl text-xs font-bold uppercase tracking-wider bg-slate-800/90 text-slate-400 border border-slate-700">
                     Ready
                 </div>
@@ -264,6 +267,7 @@
         const keyCaptureBox = document.getElementById('keyCaptureBox');
         const cancelHotkeyBtn = document.getElementById('cancelHotkeyBtn');
         const voiceControlBtn = document.getElementById('voiceControlBtn');
+        const keyboardModeBtn = document.getElementById('keyboardModeBtn');
 
         const STATE = { IDLE: 'IDLE', RUNNING: 'RUNNING', STOPPED: 'STOPPED' };
         let currentState = STATE.IDLE;
@@ -274,6 +278,7 @@
         let quotaAlertShown = false;
         let activeHotkey = { code: 'Space', label: 'Space' };
         let episodes = [];
+        let keyboardLocked = true;
 
         let startTimeMs = 0;
         let effectiveStartCountdownMs = 0;
@@ -494,6 +499,7 @@
                     activeHotkey = JSON.parse(savedHotkey);
                 } catch (e) {}
             }
+            if (keyboardLocked) activeHotkey = { code: 'Space', label: 'Space' };
             updateHotkeyUI();
 
             const savedEpisodes = localStorage.getItem('voiceCountdown_episodes');
@@ -510,20 +516,42 @@
         function updateHotkeyUI() {
             hotkeyLabel.textContent = activeHotkey.label;
             spaceInstructionKbd.textContent = activeHotkey.label;
+            hotkeyBtn.disabled = keyboardLocked;
+            hotkeyBtn.classList.toggle('opacity-50', keyboardLocked);
+            hotkeyBtn.classList.toggle('cursor-not-allowed', keyboardLocked);
+        }
+
+        function setKeyboardLocked(locked) {
+            keyboardLocked = locked;
+            if (keyboardLocked) activeHotkey = { code: 'Space', label: 'Space' };
+            keyboardModeBtn.textContent = keyboardLocked ? 'Keys: Space only' : 'Keys: Enabled';
+            keyboardModeBtn.setAttribute('aria-pressed', String(keyboardLocked));
+            keyboardModeBtn.classList.toggle('bg-red-900/60', keyboardLocked);
+            keyboardModeBtn.classList.toggle('hover:bg-red-800/70', keyboardLocked);
+            keyboardModeBtn.classList.toggle('border-red-700/70', keyboardLocked);
+            keyboardModeBtn.classList.toggle('text-red-200', keyboardLocked);
+            keyboardModeBtn.classList.toggle('bg-green-900/60', !keyboardLocked);
+            keyboardModeBtn.classList.toggle('hover:bg-green-800/70', !keyboardLocked);
+            keyboardModeBtn.classList.toggle('border-green-700/70', !keyboardLocked);
+            keyboardModeBtn.classList.toggle('text-green-200', !keyboardLocked);
+            updateHotkeyUI();
+            saveSettings();
         }
 
         // Lock keyboard input to the configured timer hotkey while this page is active.
         // Opening the rebind modal temporarily allows a key through so a new hotkey can be selected.
         window.addEventListener('keydown', (e) => {
+            if (!keyboardLocked) return;
             if (!hotkeyModal.classList.contains('hidden')) return;
-            if (e.code === activeHotkey.code) return;
+            if (e.code === 'Space') return;
             e.preventDefault();
             e.stopImmediatePropagation();
         }, true);
 
         window.addEventListener('keyup', (e) => {
+            if (!keyboardLocked) return;
             if (!hotkeyModal.classList.contains('hidden')) return;
-            if (e.code === activeHotkey.code) return;
+            if (e.code === 'Space') return;
             e.preventDefault();
             e.stopImmediatePropagation();
         }, true);
@@ -820,6 +848,7 @@
             if (voiceControlEnabled) stopVoiceRecognition();
             else startVoiceRecognition();
         });
+        keyboardModeBtn.addEventListener('click', () => setKeyboardLocked(!keyboardLocked));
         closeQuotaBtn.addEventListener('click', () => quotaModal.classList.add('hidden'));
 
         hotkeyBtn.addEventListener('click', () => {
