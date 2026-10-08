@@ -759,7 +759,7 @@
 
             const stopTimeMs = performance.now();
             const elapsedSeconds = ((stopTimeMs - startTimeMs) / 1000);
-            const episodeAdjustmentSec = Math.random() < 0.5 ? 0.5 : 1;
+            const episodeAdjustmentSec = 0.5;
             const recordedDuration = Math.max(0, elapsedSeconds - episodeAdjustmentSec).toFixed(2);
 
             const episodeNumber = episodes.length + 1;
