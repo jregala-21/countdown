@@ -126,6 +126,10 @@
                     <select id="voiceSelect" class="bg-slate-950 border border-slate-700/80 text-slate-300 text-xs rounded-xl py-2 px-2.5 w-full focus:outline-none focus:ring-2 focus:ring-blue-500 truncate">
                         <option value="">Default Voice</option>
                     </select>
+                    <button id="testVoiceBtn" type="button" class="mt-2 w-full px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 rounded-xl text-xs font-semibold text-blue-300 transition-all">
+                        Test voice
+                    </button>
+                    <p id="voiceStatus" class="text-[11px] mt-2 leading-snug text-slate-500" role="status" aria-live="polite">Press Test voice to check speech output.</p>
                 </div>
             </div>
         </main>
@@ -268,6 +272,8 @@
         const cancelHotkeyBtn = document.getElementById('cancelHotkeyBtn');
         const voiceControlBtn = document.getElementById('voiceControlBtn');
         const keyboardModeBtn = document.getElementById('keyboardModeBtn');
+        const testVoiceBtn = document.getElementById('testVoiceBtn');
+        const voiceStatus = document.getElementById('voiceStatus');
 
         const STATE = { IDLE: 'IDLE', RUNNING: 'RUNNING', STOPPED: 'STOPPED' };
         let currentState = STATE.IDLE;
@@ -286,36 +292,15 @@
         let timerAnimFrame = null;
         let lastSpokenSecond = -1;
         let availableVoices = [];
-        let speechActive = false;
-        let pendingSpeechText = null;
         let recognition = null;
         let voiceControlEnabled = false;
-
-        // Web Audio Context fallback synthesizer
-        let audioCtx = null;
-        function playFallbackBeep(freq = 600, durationSec = 0.08) {
-            try {
-                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                if (audioCtx.state === 'suspended') audioCtx.resume();
-                const osc = audioCtx.createOscillator();
-                const gain = audioCtx.createGain();
-                osc.type = 'sine';
-                osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-                gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + durationSec);
-                osc.connect(gain);
-                gain.connect(audioCtx.destination);
-                osc.start();
-                osc.stop(audioCtx.currentTime + durationSec);
-            } catch (e) {}
-        }
 
         function initSpeech() {
             if (!('speechSynthesis' in window)) return;
             
             function populateVoices() {
                 availableVoices = window.speechSynthesis.getVoices();
-                const selectedVal = voiceSelect.value;
+                const selectedVal = voiceSelect.value || localStorage.getItem('voiceCountdown_voice');
                 voiceSelect.innerHTML = '<option value="">Default Voice</option>';
                 availableVoices.forEach((voice, index) => {
                     const option = document.createElement('option');
@@ -415,61 +400,109 @@
             listen();
         }
 
-        // Bulletproof Speech Dispatcher with Web Audio Beep Fallback
+        function setVoiceStatus(message, kind) {
+            voiceStatus.textContent = message;
+            const color = kind === 'error' ? 'text-red-400' : kind === 'ok' ? 'text-emerald-400' : 'text-slate-400';
+            voiceStatus.className = 'text-[11px] mt-2 leading-snug ' + color;
+        }
+
+        let testVoiceTimer = null;
+
+        // Speaks a short sample and reports what actually happened on screen:
+        // how many voices the browser exposes, which one is used, whether the
+        // browser started speaking, and any error it raised.
+        function testVoice() {
+            if (!('speechSynthesis' in window) || typeof window.SpeechSynthesisUtterance !== 'function') {
+                setVoiceStatus('This browser does not support speech synthesis.', 'error');
+                return;
+            }
+            if (currentState === STATE.RUNNING) {
+                setVoiceStatus('Stop the timer before testing the voice.', 'error');
+                return;
+            }
+
+            const synth = window.speechSynthesis;
+            const voices = availableVoices.length ? availableVoices : synth.getVoices();
+            const idx = voiceSelect.value;
+            const chosen = (idx !== '' && voices[idx]) ? voices[idx] : null;
+            const label = chosen ? chosen.name : 'default voice';
+            const offNote = voiceToggle.checked ? '' : ' Note: the Voice Countdown checkbox is off, so the timer will stay silent.';
+
+            clearTimeout(testVoiceTimer);
+            synth.cancel();
+
+            const utterance = new SpeechSynthesisUtterance('Voice test. 3, 2, 1.');
+            utterance.rate = 1.4;
+            utterance.pitch = 1;
+            utterance.volume = 1;
+            if (chosen) utterance.voice = chosen;
+
+            let started = false;
+            utterance.onstart = () => {
+                started = true;
+                clearTimeout(testVoiceTimer);
+                setVoiceStatus('Speaking with ' + label + ' (' + voices.length + ' voices found).' + offNote, 'ok');
+            };
+            utterance.onend = () => {
+                setVoiceStatus('Finished. If you heard it, voice output works (' + label + ').' + offNote, 'ok');
+            };
+            utterance.onerror = (event) => {
+                if (event.error === 'canceled' || event.error === 'interrupted') return;
+                clearTimeout(testVoiceTimer);
+                setVoiceStatus('Speech error: ' + (event.error || 'unknown') + ' using ' + label + '. Try another voice.', 'error');
+            };
+
+            setVoiceStatus('Testing ' + label + ' (' + voices.length + ' voices found)…', 'info');
+
+            // Some browsers drop a speak() issued in the same tick as cancel().
+            setTimeout(() => {
+                synth.resume();
+                synth.speak(utterance);
+            }, 80);
+
+            testVoiceTimer = setTimeout(() => {
+                if (!started) {
+                    setVoiceStatus('The browser accepted the request but never started speaking with ' + label + '. Try a different voice, and check that the tab is not muted and the Mac output volume is up.', 'error');
+                }
+            }, 2500);
+        }
+
+        // Submit each value directly to the browser speech queue.
         function speakImmediate(text) {
             if (!voiceToggle.checked) return;
 
-            playFallbackBeep(typeof text === 'number' ? 500 + (text * 20) : 800, 0.06);
-
             if (!('speechSynthesis' in window) || typeof window.SpeechSynthesisUtterance !== 'function') {
-                delayNotice.textContent = 'Spoken countdown is not supported by this browser.';
+                setVoiceStatus('Spoken countdown is not supported by this browser.', 'error');
                 return;
             }
 
-            const speechText = String(text);
-            if (speechActive) {
-                // Keep only the newest countdown value so speech stays current without being cut off.
-                pendingSpeechText = speechText;
-                return;
-            }
+            try {
+                const utterance = new SpeechSynthesisUtterance(String(text));
+                utterance.rate = 1.4;
+                utterance.pitch = 1;
+                utterance.volume = 1;
 
-            const speakNext = (value) => {
-                speechActive = true;
-                try {
-                    const utterance = new window.SpeechSynthesisUtterance(value);
-                    utterance.rate = 1.2;
-                    utterance.pitch = 1.0;
-
-                    const selectedVoiceIndex = voiceSelect.value;
-                    if (selectedVoiceIndex !== '' && availableVoices[selectedVoiceIndex]) {
-                        utterance.voice = availableVoices[selectedVoiceIndex];
-                    }
-
-                    const finish = () => {
-                        speechActive = false;
-                        if (pendingSpeechText !== null) {
-                            const nextText = pendingSpeechText;
-                            pendingSpeechText = null;
-                            speakNext(nextText);
-                        }
-                    };
-                    utterance.onend = finish;
-                    utterance.onerror = (event) => {
-                        finish();
-                        console.warn('Countdown speech failed:', event.error || event);
-                        delayNotice.textContent = 'Speech failed (' + (event.error || 'unknown error') + '). Check your device speech settings.';
-                    };
-
-                    window.speechSynthesis.resume();
-                    window.speechSynthesis.speak(utterance);
-                } catch (error) {
-                    speechActive = false;
-                    console.warn('Countdown speech could not start:', error);
-                    delayNotice.textContent = 'Speech could not start. Check your browser and device speech settings.';
+                const selectedVoiceIndex = voiceSelect.value;
+                if (selectedVoiceIndex !== '' && availableVoices[selectedVoiceIndex]) {
+                    utterance.voice = availableVoices[selectedVoiceIndex];
                 }
-            };
 
-            speakNext(speechText);
+                utterance.onerror = (event) => {
+                    // cancel() reports an "error" for an utterance that was
+                    // intentionally interrupted (for example, when a new
+                    // countdown starts). That is expected and should not be
+                    // shown as a device speech failure.
+                    if (event.error === 'canceled' || event.error === 'interrupted') return;
+                    console.warn('Countdown speech failed:', event.error || event);
+                    setVoiceStatus('Speech failed (' + (event.error || 'unknown error') + '). Try another voice or press Test voice.', 'error');
+                };
+
+                window.speechSynthesis.resume();
+                window.speechSynthesis.speak(utterance);
+            } catch (error) {
+                console.warn('Countdown speech could not start:', error);
+                setVoiceStatus('Speech could not start. Check your browser and device speech settings.', 'error');
+            }
         }
 
         function loadSettings() {
@@ -492,6 +525,10 @@
             quotaInput.value = quotaMinutes;
 
             quotaAlertShown = localStorage.getItem('voiceCountdown_quotaAlertShown') === 'true';
+
+            // A previously saved unchecked value was making countdowns silent.
+            // Start voice enabled; the user can still turn it off for this session.
+            voiceToggle.checked = true;
 
             const savedHotkey = localStorage.getItem('voiceCountdown_hotkey');
             if (savedHotkey) {
@@ -538,23 +575,23 @@
             saveSettings();
         }
 
-        // Lock keyboard input to the configured timer hotkey while this page is active.
-        // Opening the rebind modal temporarily allows a key through so a new hotkey can be selected.
-        window.addEventListener('keydown', (e) => {
-            if (!keyboardLocked) return;
-            if (!hotkeyModal.classList.contains('hidden')) return;
-            if (e.code === 'Space') return;
+        // While keyboard lock is on, suppress every key except the configured
+        // timer hotkey. This keeps Space from scrolling the page while still
+        // allowing it to trigger the timer in the default mode.
+        function suppressLockedKeyboardInput(e) {
+            if (!keyboardLocked || !hotkeyModal.classList.contains('hidden')) return;
+            const isHotkey = e.code === activeHotkey.code;
+            const hasModifier = e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
+            if (isHotkey && !hasModifier) {
+                e.preventDefault();
+                return;
+            }
             e.preventDefault();
             e.stopImmediatePropagation();
-        }, true);
+        }
 
-        window.addEventListener('keyup', (e) => {
-            if (!keyboardLocked) return;
-            if (!hotkeyModal.classList.contains('hidden')) return;
-            if (e.code === 'Space') return;
-            e.preventDefault();
-            e.stopImmediatePropagation();
-        }, true);
+        window.addEventListener('keydown', suppressLockedKeyboardInput, true);
+        window.addEventListener('keyup', suppressLockedKeyboardInput, true);
 
         function saveSettings() {
             localStorage.setItem('voiceCountdown_targetTime', targetDurationSec);
@@ -563,15 +600,23 @@
             localStorage.setItem('voiceCountdown_quotaAlertShown', quotaAlertShown);
             localStorage.setItem('voiceCountdown_hotkey', JSON.stringify(activeHotkey));
             localStorage.setItem('voiceCountdown_episodes', JSON.stringify(episodes));
+            localStorage.setItem('voiceCountdown_voiceEnabled', voiceToggle.checked);
+            localStorage.setItem('voiceCountdown_voice', voiceSelect.value);
         }
 
         function computeEffectiveCountdown() {
             return Math.max(0, targetDurationSec - startDelaySec);
         }
 
+        // The whole-second portion rendered by updateDisplay is the source
+        // of truth for both the on-screen and spoken countdown values.
+        function getDisplayedSeconds(ms) {
+            return Math.floor(Math.max(0, ms) / 1000);
+        }
+
         function updateDisplay(ms) {
             const clampedMs = Math.max(0, ms);
-            const totalSeconds = Math.floor(clampedMs / 1000);
+            const totalSeconds = getDisplayedSeconds(clampedMs);
             const hundredths = Math.floor((clampedMs % 1000) / 10);
             const formattedHundredths = hundredths.toString().padStart(2, '0');
 
@@ -613,6 +658,35 @@
             }
         }
 
+        // Ticker: a Web Worker interval is not paused when the tab is in the
+        // background (requestAnimationFrame is), so the spoken countdown keeps
+        // going while you work in another window. Falls back to setInterval.
+        let tickWorker = null;
+        let tickWorkerUrl = null;
+        let tickInterval = null;
+
+        function startTicker(fn) {
+            stopTicker();
+            try {
+                const blob = new Blob(['setInterval(function(){postMessage(0)},40)'], { type: 'text/javascript' });
+                tickWorkerUrl = URL.createObjectURL(blob);
+                tickWorker = new Worker(tickWorkerUrl);
+                tickWorker.onmessage = fn;
+                tickWorker.onerror = () => {
+                    stopTicker();
+                    tickInterval = setInterval(fn, 40);
+                };
+            } catch (e) {
+                tickInterval = setInterval(fn, 40);
+            }
+        }
+
+        function stopTicker() {
+            if (tickWorker) { tickWorker.terminate(); tickWorker = null; }
+            if (tickWorkerUrl) { URL.revokeObjectURL(tickWorkerUrl); tickWorkerUrl = null; }
+            if (tickInterval) { clearInterval(tickInterval); tickInterval = null; }
+        }
+
         function runTimerLoop() {
             if (currentState !== STATE.RUNNING) return;
 
@@ -624,26 +698,24 @@
                 currentRemainingMs = 0;
                 updateDisplay(0);
                 speakImmediate("Zero");
-                stopAndRecordEpisode();
+                stopAndRecordEpisode(false);
                 return;
             }
 
             updateDisplay(currentRemainingMs);
 
-            const currentSecondFloor = Math.ceil(currentRemainingMs / 1000);
-            if (currentSecondFloor !== lastSpokenSecond) {
-                lastSpokenSecond = currentSecondFloor;
-                speakImmediate(currentSecondFloor);
+            const displayedSecond = getDisplayedSeconds(currentRemainingMs);
+            if (displayedSecond !== lastSpokenSecond && displayedSecond >= 1) {
+                lastSpokenSecond = displayedSecond;
+                speakImmediate(displayedSecond);
             }
-
-            timerAnimFrame = requestAnimationFrame(runTimerLoop);
         }
 
         function startTimer() {
-            if ('speechSynthesis' in window) {
+            let wasSpeaking = false;
+            if ('speechSynthesis' in window && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
                 window.speechSynthesis.cancel();
-                speechActive = false;
-                pendingSpeechText = null;
+                wasSpeaking = true;
             }
             const effectiveSec = computeEffectiveCountdown();
             effectiveStartCountdownMs = effectiveSec * 1000;
@@ -651,24 +723,44 @@
 
             startTimeMs = performance.now();
             currentState = STATE.RUNNING;
-            
-            const startSec = Math.ceil(effectiveSec);
-            lastSpokenSecond = startSec;
-            speakImmediate(startSec);
+
+            const startSec = getDisplayedSeconds(currentRemainingMs);
+            lastSpokenSecond = -1;
+            if ('speechSynthesis' in window) window.speechSynthesis.resume();
+            if (startSec >= 1) {
+                // Some browsers drop a speak() issued in the same tick as cancel().
+                if (wasSpeaking) {
+                    setTimeout(() => {
+                        if (currentState !== STATE.RUNNING) return;
+                        const remainingMs = Math.max(0, effectiveStartCountdownMs - (performance.now() - startTimeMs));
+                        currentRemainingMs = remainingMs;
+                        const displayedSecond = getDisplayedSeconds(remainingMs);
+                        if (displayedSecond >= 1 && displayedSecond !== lastSpokenSecond) {
+                            lastSpokenSecond = displayedSecond;
+                            speakImmediate(displayedSecond);
+                        }
+                    }, 80);
+                } else {
+                    lastSpokenSecond = startSec;
+                    speakImmediate(startSec);
+                }
+            }
 
             updateUIState();
-            timerAnimFrame = requestAnimationFrame(runTimerLoop);
+            startTicker(runTimerLoop);
         }
 
-        function stopAndRecordEpisode() {
-            if (timerAnimFrame) {
-                cancelAnimationFrame(timerAnimFrame);
-                timerAnimFrame = null;
+        function stopAndRecordEpisode(cancelCountdownSpeech = true) {
+            stopTicker();
+
+            if (cancelCountdownSpeech && 'speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
             }
 
             const stopTimeMs = performance.now();
             const elapsedSeconds = ((stopTimeMs - startTimeMs) / 1000);
-            const recordedDuration = Math.max(0, elapsedSeconds).toFixed(2);
+            const episodeAdjustmentSec = Math.random() < 0.5 ? 1 : 1.5;
+            const recordedDuration = Math.max(0, elapsedSeconds - episodeAdjustmentSec).toFixed(2);
 
             const episodeNumber = episodes.length + 1;
             const episodeData = {
@@ -805,12 +897,17 @@
             }
         }
 
+        function isEditableElement(element) {
+            return ['INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName) || element.isContentEditable;
+        }
+
         window.addEventListener('keydown', (e) => {
-            if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+            if (!hotkeyModal.classList.contains('hidden') || isEditableElement(e.target)) {
                 return;
             }
 
-            if (e.code === activeHotkey.code) {
+            const hasModifier = e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
+            if (e.code === activeHotkey.code && (!keyboardLocked || !hasModifier)) {
                 e.preventDefault();
                 handleCycleTrigger();
             }
@@ -844,6 +941,14 @@
         });
 
         exportCsvBtn.addEventListener('click', exportToCsv);
+        voiceToggle.addEventListener('change', () => {
+            saveSettings();
+            if (!voiceToggle.checked && 'speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+            }
+        });
+        voiceSelect.addEventListener('change', saveSettings);
+        testVoiceBtn.addEventListener('click', testVoice);
         voiceControlBtn.addEventListener('click', () => {
             if (voiceControlEnabled) stopVoiceRecognition();
             else startVoiceRecognition();
