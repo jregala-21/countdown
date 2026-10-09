@@ -505,6 +505,50 @@
             }
         }
 
+        // Speech synthesis may take seconds to start on Windows. Keep only the
+        // latest countdown number in its queue, and validate it immediately
+        // before playback so speech cannot trail behind the visual timer.
+        function speakCountdownSecond(second) {
+            if (!voiceToggle.checked || currentState !== STATE.RUNNING || second < 1) return;
+            if (!('speechSynthesis' in window) || typeof window.SpeechSynthesisUtterance !== 'function') return;
+
+            const synth = window.speechSynthesis;
+            if (synth.speaking || synth.pending) synth.cancel();
+
+            const utterance = new SpeechSynthesisUtterance(String(second));
+            utterance.rate = 1.4;
+            utterance.pitch = 1;
+            utterance.volume = 1;
+            const selectedVoiceIndex = voiceSelect.value;
+            if (selectedVoiceIndex !== '' && availableVoices[selectedVoiceIndex]) {
+                utterance.voice = availableVoices[selectedVoiceIndex];
+            }
+            utterance.onstart = () => {
+                if (currentState !== STATE.RUNNING) {
+                    synth.cancel();
+                    return;
+                }
+
+                const currentSecond = getDisplayedSeconds(
+                    Math.max(0, effectiveStartCountdownMs - (Date.now() - startTimeMs))
+                );
+                if (currentSecond !== second) {
+                    synth.cancel();
+                    if (currentSecond > 0) {
+                        lastSpokenSecond = currentSecond;
+                        speakCountdownSecond(currentSecond);
+                    }
+                }
+            };
+            utterance.onerror = (event) => {
+                if (event.error === 'canceled' || event.error === 'interrupted') return;
+                console.warn('Countdown speech failed:', event.error || event);
+                setVoiceStatus('Speech failed (' + (event.error || 'unknown error') + '). Try another voice or press Test voice.', 'error');
+            };
+            synth.resume();
+            synth.speak(utterance);
+        }
+
         function loadSettings() {
             const savedTime = localStorage.getItem('voiceCountdown_targetTime');
             if (savedTime && !isNaN(savedTime)) {
@@ -709,7 +753,7 @@
             const displayedSecond = getDisplayedSeconds(currentRemainingMs);
             if (displayedSecond !== lastSpokenSecond && displayedSecond >= 1) {
                 lastSpokenSecond = displayedSecond;
-                speakImmediate(displayedSecond);
+                speakCountdownSecond(displayedSecond);
             }
         }
 
@@ -748,12 +792,12 @@
                         const displayedSecond = getDisplayedSeconds(remainingMs);
                         if (displayedSecond >= 1 && displayedSecond !== lastSpokenSecond) {
                             lastSpokenSecond = displayedSecond;
-                            speakImmediate(displayedSecond);
+                            speakCountdownSecond(displayedSecond);
                         }
                     }, 80);
                 } else {
                     lastSpokenSecond = startSec;
-                    speakImmediate(startSec);
+                    speakCountdownSecond(startSec);
                 }
             }
 
