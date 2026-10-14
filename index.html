@@ -295,7 +295,11 @@
         let recognition = null;
         let voiceControlEnabled = false;
         let voiceRestartTimer = null;
+        let voiceStartWatchdog = null;
         let voiceSessionGeneration = 0;
+        let voiceStartFailures = 0;
+        let voicePhase = 'off';
+        let voiceListenAgain = null;
 
         function getSpeechVolume() {
             // SpeechSynthesisUtterance.volume is defined from 0 to 1 by browsers.
@@ -337,9 +341,13 @@
 
         function stopVoiceRecognition() {
             voiceControlEnabled = false;
+            voicePhase = 'off';
+            voiceListenAgain = null;
             voiceSessionGeneration++;
             clearTimeout(voiceRestartTimer);
             voiceRestartTimer = null;
+            clearTimeout(voiceStartWatchdog);
+            voiceStartWatchdog = null;
             const activeRecognition = recognition;
             recognition = null;
             if (activeRecognition) {
@@ -360,10 +368,15 @@
 
             voiceControlEnabled = true;
             const generation = ++voiceSessionGeneration;
+            voiceStartFailures = 0;
+            voicePhase = currentState === STATE.RUNNING
+                ? (currentRemainingMs <= 10000 ? 'waiting-stop' : 'paused')
+                : 'waiting-start';
             setVoiceControlButton('Starting voice commands…', true);
 
             const listen = () => {
                 if (!voiceControlEnabled || generation !== voiceSessionGeneration || recognition) return;
+                if (voicePhase === 'paused' || voicePhase === 'off') return;
                 const session = new Recognition();
                 recognition = session;
                 session.lang = 'en-US';
@@ -374,7 +387,10 @@
                 session.interimResults = false;
 
                 session.onstart = () => {
-                    setVoiceControlButton('Voice commands on · click to stop', true);
+                    clearTimeout(voiceStartWatchdog);
+                    voiceStartWatchdog = null;
+                    voiceStartFailures = 0;
+                    updateVoiceCommandLabel();
                     updateUIState();
                 };
                 session.onresult = (event) => {
@@ -384,11 +400,10 @@
                         const command = result[0].transcript.trim().toLowerCase();
                         if (!command) continue;
                         setVoiceStatus('Heard: “' + command + '”. Listening for the next command…', 'ok');
-                        // Test stop first so a longer transcript containing both
-                        // words cannot accidentally start another episode.
-                        if (/\bstop\b/.test(command) && currentState === STATE.RUNNING) {
+                        // Only accept the command for the current timer phase.
+                        if (voicePhase === 'waiting-stop' && /\bstop\b/.test(command) && currentState === STATE.RUNNING) {
                             stopAndRecordEpisode();
-                        } else if (/\bstart\b/.test(command) && currentState !== STATE.RUNNING) {
+                        } else if (voicePhase === 'waiting-start' && /\bstart\b/.test(command) && currentState !== STATE.RUNNING) {
                             startTimer();
                         }
                     }
@@ -417,7 +432,7 @@
                     if (recognition !== session) return;
                     recognition = null;
                     if (voiceControlEnabled && generation === voiceSessionGeneration) {
-                        setVoiceControlButton('Reconnecting voice commands…', true);
+                        updateVoiceCommandLabel();
                         clearTimeout(voiceRestartTimer);
                         voiceRestartTimer = window.setTimeout(() => {
                             voiceRestartTimer = null;
@@ -429,10 +444,39 @@
                 try {
                     session.start();
                     delayNotice.textContent = 'Listening for “start” and “stop”.';
+                    clearTimeout(voiceStartWatchdog);
+                    voiceStartWatchdog = window.setTimeout(() => {
+                        if (recognition !== session || !voiceControlEnabled || generation !== voiceSessionGeneration) return;
+                        recognition = null;
+                        voiceStartFailures++;
+                        try { session.abort(); } catch (error) { /* session may already have ended */ }
+                        if (voiceStartFailures >= 4) {
+                            stopVoiceRecognition();
+                            setVoiceControlButton('Retry voice commands', false);
+                            setVoiceStatus('The browser did not restart speech recognition after several attempts. Check your connection and microphone permission, then click Retry voice commands.', 'error');
+                            return;
+                        }
+                        setVoiceStatus('Speech recognition did not start. Retrying (' + voiceStartFailures + '/4)…', 'error');
+                        clearTimeout(voiceRestartTimer);
+                        voiceRestartTimer = window.setTimeout(() => {
+                            voiceRestartTimer = null;
+                            listen();
+                        }, 800);
+                    }, 8000);
                 } catch (error) {
                     console.warn('Could not start voice recognition:', error);
                     if (recognition === session) recognition = null;
                     if (voiceControlEnabled && generation === voiceSessionGeneration) {
+                        clearTimeout(voiceStartWatchdog);
+                        voiceStartWatchdog = null;
+                        voiceStartFailures++;
+                        if (voiceStartFailures >= 4) {
+                            stopVoiceRecognition();
+                            setVoiceControlButton('Retry voice commands', false);
+                            setVoiceStatus('The browser could not start speech recognition after several attempts. Check your connection and microphone permission, then click Retry voice commands.', 'error');
+                            return;
+                        }
+                        setVoiceStatus('Could not start speech recognition. Retrying (' + voiceStartFailures + '/4)…', 'error');
                         clearTimeout(voiceRestartTimer);
                         voiceRestartTimer = window.setTimeout(() => {
                             voiceRestartTimer = null;
@@ -442,7 +486,50 @@
                 }
             };
 
+            voiceListenAgain = listen;
             listen();
+            updateUIState();
+        }
+
+        function updateVoiceCommandLabel() {
+            if (!voiceControlEnabled) return;
+            const labels = {
+                'waiting-start': 'Voice on · say START',
+                'waiting-stop': 'Voice on · say STOP',
+                paused: 'Voice on · waiting for 10 seconds'
+            };
+            setVoiceControlButton(labels[voicePhase] || 'Voice commands on', true);
+        }
+
+        function pauseVoiceListening() {
+            if (!voiceControlEnabled) return;
+            voicePhase = 'paused';
+            clearTimeout(voiceRestartTimer);
+            voiceRestartTimer = null;
+            clearTimeout(voiceStartWatchdog);
+            voiceStartWatchdog = null;
+            const activeRecognition = recognition;
+            recognition = null;
+            if (activeRecognition) {
+                activeRecognition.onend = null;
+                try { activeRecognition.abort(); } catch (error) { /* session may already have ended */ }
+            }
+            updateVoiceCommandLabel();
+            updateUIState();
+        }
+
+        function resumeVoiceListening(phase) {
+            if (!voiceControlEnabled) return;
+            voicePhase = phase;
+            updateVoiceCommandLabel();
+            if (recognition) return;
+            clearTimeout(voiceRestartTimer);
+            voiceRestartTimer = window.setTimeout(() => {
+                voiceRestartTimer = null;
+                if (voiceControlEnabled && voicePhase !== 'paused' && voiceListenAgain) {
+                    voiceListenAgain();
+                }
+            }, 150);
             updateUIState();
         }
 
@@ -734,7 +821,9 @@
                     statusBadge.textContent = "Running";
                     statusBadge.className = "px-3.5 py-1.5 rounded-xl text-xs font-bold uppercase tracking-wider bg-blue-500/20 text-blue-400 border border-blue-500/50";
                     instructionText.innerHTML = voiceControlEnabled
-                        ? 'Voice commands on: say <kbd class="px-2.5 py-1 bg-slate-800 border border-slate-600 rounded-lg text-white font-mono text-xs shadow-md">STOP</kbd> to end and record'
+                        ? (voicePhase === 'waiting-stop'
+                            ? 'Voice commands on: say <kbd class="px-2.5 py-1 bg-slate-800 border border-slate-600 rounded-lg text-white font-mono text-xs shadow-md">STOP</kbd> to end and record'
+                            : 'Voice commands on: say STOP when 10 seconds remain')
                         : `Press <kbd class="px-2.5 py-1 bg-slate-800 border border-slate-600 rounded-lg text-white font-mono text-xs shadow-md">${activeHotkey.label}</kbd> to Stop & Record`;
                     mainContainer.classList.add('timer-running');
                     break;
@@ -795,6 +884,10 @@
                 return;
             }
 
+            if (voiceControlEnabled && voicePhase === 'paused' && currentRemainingMs <= 10000) {
+                resumeVoiceListening('waiting-stop');
+            }
+
             updateDisplay(currentRemainingMs);
 
             const displayedSecond = getDisplayedSeconds(currentRemainingMs);
@@ -814,6 +907,13 @@
         window.addEventListener('pageshow', () => runTimerLoop());
 
         function startTimer() {
+            if (voiceControlEnabled) {
+                pauseVoiceListening();
+                if (computeEffectiveCountdown() <= 10) {
+                    // Short timers have already reached the 10-second window.
+                    resumeVoiceListening('waiting-stop');
+                }
+            }
             let wasSpeaking = false;
             if ('speechSynthesis' in window && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
                 window.speechSynthesis.cancel();
@@ -880,6 +980,8 @@
 
             currentState = STATE.STOPPED;
             updateUIState();
+
+            if (voiceControlEnabled) resumeVoiceListening('waiting-start');
 
             checkQuotaTrigger();
         }
